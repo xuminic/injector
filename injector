@@ -1,0 +1,226 @@
+#!/bin/sh
+
+BOOTSCRIPT="/usr/local/bin/firstboot.sh"
+INITSCRIPT="initial.sh"
+BOOTSERVICE="firstboot.service"
+BOOTLOG="/var/log/firstboot.log"
+URLLIST="package.url"
+ADMIN="/home/ubuntu"
+
+
+usage_exit()
+{
+  cat << my_usage
+Usage: injector [-u] mount_point
+my_usage
+  exit 0
+}
+
+condition_check()
+{
+  if ! test -d "$1/etc"; then
+    echo "error: root file system not found at \"$1\""
+    return 0
+  fi
+  if ! test x$(id -u) = "x0"; then
+    echo "error: root permission required"
+    return 0
+  fi
+  return 1
+}
+  
+uninstall()
+{
+  condition_check $1
+  if test "$?" = "0"; then
+    exit 1
+  fi
+
+  echo "Deleting ${1}$BOOTSCRIPT"
+  rm -f ${1}$BOOTSCRIPT
+  echo "Deleting $BOOTLOG"
+  rm -f $BOOTLOG
+  echo "Deleting ${1}/etc/systemd/system/$BOOTSERVICE"
+  rm -f ${1}/etc/systemd/system/$BOOTSERVICE
+  echo "Deleting ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE"
+  rm -f ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE
+  echo "Recovering to the original netplan"
+  cp -y 00-installer-config_orig.yaml ${1}/etc/netplan/00-installer-config.yaml
+
+  package_delete $URLLIST $1
+  exit 0
+}
+
+list_injected()
+{
+  ls -l ${1}$BOOTSCRIPT
+  ls -l $BOOTLOG
+  ls -l ${1}/etc/systemd/system/$BOOTSERVICE
+  ls -l ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE
+  ls -l ${1}/etc/netplan
+  ls -l ${1}/var/cache/apt/archives/*.deb
+}
+
+# "apt-get --print-uris install PACKAGE_NAME | cut -d\"'\" -f2"
+package_download()
+{
+  local TARGET=
+
+  if ! test -f $1; then
+    echo "warning: invalid package list \"$1\""
+    return 1
+  fi
+
+  if ! test x"$2" = "x"; then
+    condition_check $2
+    if test "$?" = "0"; then
+      return 1
+    fi
+    TARGET="-P $2/var/cache/apt/archives/"
+  fi
+
+  wget -i $1 $TARGET 
+  return 0
+}
+
+package_delete()
+{
+  local TARGET=
+
+  if ! test -f $1; then
+    echo "warning: invalid package list \"$1\""
+    return 1
+  fi
+
+  if ! test x"$2" = "x"; then
+    condition_check $2
+    if test "$?" = "0"; then
+      return 1
+    fi
+    TARGET="$2/var/cache/apt/archives"
+  fi
+
+  # IFS stands for Internal Field Separator in the shell.
+  # It’s a special variable that tells the shell how to split text into words when reading input.
+  # Setting IFS= (empty) prevents the shell from trimming leading/trailing whitespace from each line.
+  # "-r" tells "read" not to interpret backslashes (\) as escape characters
+  while IFS= read -r url; do
+    # Get the basename of the URL (the .deb filename)
+    if test x$TARGET = "x"; then
+      file=$(basename "$url")
+    else
+      file=$TARGET/$(basename "$url")
+    fi
+
+    # Check if the file exists
+    if test -f "$file"; then
+      echo "Deleting $file"
+      rm -f "$file"
+    else
+      echo "File $file not found, skipping"
+    fi
+  done < "$1"
+  return 0
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage_exit;;
+
+    -u|--undo) uninstall $2;;
+
+    -d|--download) package_download $2 $3; exit 0;;
+
+    --delete) package_delete $2 $3; exit 0;;
+
+    -l|--list) list_injected $2; exit 0;;
+
+    -*) echo Unknown parameter [$@]; exit 1;;
+    *) break;;
+  esac
+  shift
+done	
+
+if test x$1 = "x"; then
+  usage_exit
+fi
+
+## inject the one-off initial script
+echo "Injecting the one-off initial script to ${1}$BOOTSCRIPT"
+cat << EOF > ${1}$BOOTSCRIPT
+#!/bin/bash
+exec >> (awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' >> $BOOTLOG) 2>&1
+set -x   # optional: makes bash print commands before running them
+
+echo "[INFO] First boot script running..."
+
+# === Your commands go here ===
+touch $ADMIN/firstboot-ran
+
+apt install hostapd dnsmasq wireless-tools psmisc -y
+
+echo "Creating /etc/hostapd/hostapd.conf"
+cat << SUBEOF > /etc/hostapd/hostapd.conf
+interface=wlan0
+ssid=MyDeviceAP
+channel=6
+hw_mode=g
+auth_algs=1
+wmm_enabled=0
+driver=nl80211
+SUBEOF
+
+echo "Creating /etc/dnsmasq.ap.conf"
+cat << SUBEOF > /etc/dnsmasq.ap.conf
+interface=wlan0
+dhcp-range=192.168.42.10,192.168.42.100,12h
+dhcp-option=3,192.168.42.1
+address=/gateway/192.168.42.1
+SUBEOF
+
+# === Delete self and systemd unit ===
+echo "Removing the one-off start up script"
+rm -f /etc/systemd/system/$BOOTSERVICE
+rm -f $BOOTSCRIPT
+systemctl daemon-reexec
+EOF
+chmod 755 ${1}$BOOTSCRIPT
+
+
+## inject the systemd service for the initial script
+echo "Injecting the systemd service to ${1}/etc/systemd/system/$BOOTSERVICE"
+cat << EOF > ${1}/etc/systemd/system/$BOOTSERVICE
+[Unit]
+Description=First boot script
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$BOOTSCRIPT
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+ln -s ../$BOOTSERVICE ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE
+
+## inject the netplan for AP mode
+echo "Injecting the netplan configuration for AP mode"
+cp -y 00-installer-config_ap.yaml ${1}/etc/netplan/00-installer-config.yaml
+
+## download required packages
+echo "Downloading the required packages"
+package_download $URLLIST $1
+
+## for admin convenience
+echo "Injecting VIM profile"
+cat << EOF > ${1}$ADMIN/.vimrc
+runtime! vimrc_example.vim
+filetype indent on
+set autoindent
+set nobackup
+set noundofile
+set mouse=
+set so=1
+EOF
+
