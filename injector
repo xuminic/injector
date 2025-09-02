@@ -1,4 +1,13 @@
-#!/bin/sh
+#!/bin/bash
+#####################################################################
+# Quick guide to Image rebuild
+# 1. install ImgRePacker, android-sdk-libsparse-utils, PhoenixCard
+# 2. imgrepacker image_file
+# 3. simg2img rootfs.fex rootfs.raw
+# 4. sudo mount -o loop rootfs.raw /mnt
+# 5. img2simg rootfs.raw rootfs.fex
+# 6. imgrepacker image_file.dump
+#####################################################################
 
 BOOTSCRIPT="/usr/local/bin/firstboot.sh"
 INITSCRIPT="initial.sh"
@@ -7,14 +16,6 @@ BOOTLOG="/var/log/firstboot.log"
 URLLIST="package.url"
 ADMIN="/home/ubuntu"
 
-
-usage_exit()
-{
-  cat << my_usage
-Usage: injector [-u] mount_point
-my_usage
-  exit 0
-}
 
 condition_check()
 {
@@ -44,8 +45,10 @@ uninstall()
   rm -f ${1}/etc/systemd/system/$BOOTSERVICE
   echo "Deleting ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE"
   rm -f ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE
+  echo "Deleting ${1}$ADMIN/.vimrc"
+  rm -f ${1}$ADMIN/.vimrc
   echo "Recovering to the original netplan"
-  cp -y 00-installer-config_orig.yaml ${1}/etc/netplan/00-installer-config.yaml
+  cp -f 00-installer-config_orig.yaml ${1}/etc/netplan/00-installer-config.yaml
 
   package_delete $URLLIST $1
   exit 0
@@ -53,12 +56,13 @@ uninstall()
 
 list_injected()
 {
-  ls -l ${1}$BOOTSCRIPT
-  ls -l $BOOTLOG
-  ls -l ${1}/etc/systemd/system/$BOOTSERVICE
-  ls -l ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE
-  ls -l ${1}/etc/netplan
-  ls -l ${1}/var/cache/apt/archives/*.deb
+  local LIST="${1}$BOOTSCRIPT  \
+	  ${1}/etc/systemd/system/$BOOTSERVICE \
+	  ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE \
+	  ${1}/etc/netplan/* \
+	  ${1}$ADMIN/.vimrc \
+	  ${1}/var/cache/apt/archives/*.deb"
+  ls -l $LIST
 }
 
 # "apt-get --print-uris install PACKAGE_NAME | cut -d\"'\" -f2"
@@ -123,6 +127,35 @@ package_delete()
   return 0
 }
 
+# $1=FS $2=user $3/plus=files
+# for example: sudo ./injector --owner /mnt ubuntu /mnt/home/ubuntu/.vimrc
+change_owner()
+{
+  condition_check $1
+  if test "$?" = "0"; then
+    return 1
+  fi
+
+  UGID=$(grep $2 ${1}/etc/passwd | cut -d':' -f 3-4)
+  
+  shift 2
+  chown $UGID $@
+}
+
+usage_exit()
+{
+  cat << my_usage
+Usage: 
+  injector mount_point                     - inject scripts and packages
+  injector -u mount_point                  - remove the injected contents
+  injector -d url_list [mount_point]       - download packages
+  injector --delete url_list [mount_point] - remove the downloaded packages
+  injector -l mount_point                  - list the injected items
+my_usage
+  exit 0
+}
+
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage_exit;;
@@ -134,6 +167,11 @@ while [ "$#" -gt 0 ]; do
     --delete) package_delete $2 $3; exit 0;;
 
     -l|--list) list_injected $2; exit 0;;
+
+    --owner) 
+      shift
+      change_owner "$@"
+      exit 0;;
 
     -*) echo Unknown parameter [$@]; exit 1;;
     *) break;;
@@ -149,7 +187,9 @@ fi
 echo "Injecting the one-off initial script to ${1}$BOOTSCRIPT"
 cat << EOF > ${1}$BOOTSCRIPT
 #!/bin/bash
-exec >> (awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }' >> $BOOTLOG) 2>&1
+# Process substitution (> >( … )) is bash only!!
+#
+exec > >(awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), \$0; fflush(); }' >> $BOOTLOG) 2>&1
 set -x   # optional: makes bash print commands before running them
 
 echo "[INFO] First boot script running..."
@@ -157,7 +197,7 @@ echo "[INFO] First boot script running..."
 # === Your commands go here ===
 touch $ADMIN/firstboot-ran
 
-apt install hostapd dnsmasq wireless-tools psmisc -y
+apt-get --no-download install hostapd dnsmasq wireless-tools psmisc -y
 
 echo "Creating /etc/hostapd/hostapd.conf"
 cat << SUBEOF > /etc/hostapd/hostapd.conf
@@ -206,7 +246,7 @@ ln -s ../$BOOTSERVICE ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVI
 
 ## inject the netplan for AP mode
 echo "Injecting the netplan configuration for AP mode"
-cp -y 00-installer-config_ap.yaml ${1}/etc/netplan/00-installer-config.yaml
+cp -f 00-installer-config_ap.yaml ${1}/etc/netplan/00-installer-config.yaml
 
 ## download required packages
 echo "Downloading the required packages"
@@ -223,4 +263,7 @@ set noundofile
 set mouse=
 set so=1
 EOF
+change_owner ${1} $ADMIN ${1}$ADMIN/.vimrc
+
+
 
