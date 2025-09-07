@@ -349,10 +349,7 @@ cat << EOF > ${1}/etc/systemd/system/$BOOTSERVICE
 [Unit]
 Description=First boot script
 # Delay until the system is fully up
-#After=multi-user.target network-online.target
-#Wants=network-online.target
-After=default.target
-WantedBy=default.target
+After=network.target
 
 [Service]
 Type=oneshot
