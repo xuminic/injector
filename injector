@@ -9,12 +9,14 @@
 # 6. imgrepacker image_file.dump
 #####################################################################
 
-BOOTSCRIPT="/usr/local/bin/firstboot.sh"
+BOOTSCRIPT="/usr/local/sbin/firstboot.sh"
+BOOTLOG="/var/log/firstboot.log"
+ADMIN="/home/ubuntu"
 INITSCRIPT="initial.sh"
 BOOTSERVICE="firstboot.service"
-BOOTLOG="/var/log/firstboot.log"
 URLLIST="package.url"
-ADMIN="/home/ubuntu"
+PACKAGE="."
+PKGLIST="hostapd dnsmasq wireless-tools psmisc libiw30 lsof"
 
 
 condition_check()
@@ -39,6 +41,8 @@ uninstall()
 
   echo "Deleting ${1}$BOOTSCRIPT"
   rm -f ${1}$BOOTSCRIPT
+  rm -f ${1}/usr/local/sbin/switch_to_ap.sh
+  rm -f ${1}/usr/local/sbin/switch_to_sta.sh
   echo "Deleting $BOOTLOG"
   rm -f $BOOTLOG
   echo "Deleting ${1}/etc/systemd/system/$BOOTSERVICE"
@@ -57,39 +61,39 @@ uninstall()
 list_injected()
 {
   local LIST="${1}$BOOTSCRIPT  \
+	  ${1}/usr/local/sbin/switch_* \
 	  ${1}/etc/systemd/system/$BOOTSERVICE \
 	  ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE \
 	  ${1}/etc/netplan/* \
 	  ${1}$ADMIN/.vimrc \
 	  ${1}/var/cache/apt/archives/*.deb"
   ls -l $LIST
+
+  if test x$2 = "x"; then
+    return 0
+  fi
+
+  # IFS stands for Internal Field Separator in the shell.
+  # It’s a special variable that tells the shell how to split text into words when reading input.
+  # Setting IFS= (empty) prevents the shell from trimming leading/trailing whitespace from each line.
+  # "-r" tells "read" not to interpret backslashes (\) as escape characters
+  while IFS= read -r url; do
+    # skip empty lines and lines starting with '#'
+    test -z "$url" && continue
+    case "$url" in
+      \#*) continue ;;
+    esac
+
+    # Get the basename of the URL (the .deb filename)
+    file=$(basename "$url")
+    echo "Expecting $PACKAGE/$file"
+  done < "$2"
 }
 
 # "apt-get --print-uris install PACKAGE_NAME | cut -d\"'\" -f2"
 package_download()
 {
-  local TARGET=
-
-  if ! test -f $1; then
-    echo "warning: invalid package list \"$1\""
-    return 1
-  fi
-
-  if ! test x"$2" = "x"; then
-    condition_check $2
-    if test "$?" = "0"; then
-      return 1
-    fi
-    TARGET="-P $2/var/cache/apt/archives/"
-  fi
-
-  wget -i $1 $TARGET 
-  return 0
-}
-
-package_delete()
-{
-  local TARGET=
+  local TARGET=.
 
   if ! test -f $1; then
     echo "warning: invalid package list \"$1\""
@@ -102,6 +106,11 @@ package_delete()
       return 1
     fi
     TARGET="$2/var/cache/apt/archives"
+
+    if test -f $PACKAGE/heg_*.deb; then
+      echo Transferring $PACKAGE/heg_*.deb
+      cp -f $PACKAGE/heg_*.deb $TARGET
+    fi
   fi
 
   # IFS stands for Internal Field Separator in the shell.
@@ -109,12 +118,62 @@ package_delete()
   # Setting IFS= (empty) prevents the shell from trimming leading/trailing whitespace from each line.
   # "-r" tells "read" not to interpret backslashes (\) as escape characters
   while IFS= read -r url; do
+    # skip empty lines and lines starting with '#'
+    test -z "$url" && continue
+    case "$url" in
+      \#*) continue ;;
+    esac
+
     # Get the basename of the URL (the .deb filename)
-    if test x$TARGET = "x"; then
-      file=$(basename "$url")
+    file=$(basename "$url")
+
+    # Check if the file exists
+    if test -f "$PACKAGE/$file"; then
+      echo "Transferring $PACKAGE/$file"
+      cp -f $PACKAGE/$file $TARGET
     else
-      file=$TARGET/$(basename "$url")
+      echo "Downloading $file"
+      wget $url -P $TARGET
     fi
+  done < "$1"
+  return 0
+}
+
+package_delete()
+{
+  local TARGET=.
+
+  if ! test -f $1; then
+    echo "warning: invalid package list \"$1\""
+    return 1
+  fi
+
+  if ! test x"$2" = "x"; then
+    condition_check $2
+    if test "$?" = "0"; then
+      return 1
+    fi
+    TARGET="$2/var/cache/apt/archives"
+
+    if test -f $TARGET/heg_*.deb; then
+      echo Deleting $TARGET/heg_*.deb
+      rm -f $TARGET/heg_*.deb
+    fi
+  fi
+
+  # IFS stands for Internal Field Separator in the shell.
+  # It’s a special variable that tells the shell how to split text into words when reading input.
+  # Setting IFS= (empty) prevents the shell from trimming leading/trailing whitespace from each line.
+  # "-r" tells "read" not to interpret backslashes (\) as escape characters
+  while IFS= read -r url; do
+    # skip empty lines and lines starting with '#'
+    test -z "$url" && continue
+    case "$url" in
+      \#*) continue ;;
+    esac
+
+    # Get the basename of the URL (the .deb filename)
+    file=$TARGET/$(basename "$url")
 
     # Check if the file exists
     if test -f "$file"; then
@@ -125,6 +184,16 @@ package_delete()
     fi
   done < "$1"
   return 0
+}
+
+package_url()
+{
+  if ! test x$1 = "x"; then
+    PKGLIST="$@"
+  fi
+  for i in $PKGLIST; do
+    apt-get --print-uris install $i 2> /dev/null | grep "http" | cut -d"'" -f2
+  done
 }
 
 # $1=FS $2=user $3/plus=files
@@ -151,6 +220,8 @@ Usage:
   injector -d url_list [mount_point]       - download packages
   injector --delete url_list [mount_point] - remove the downloaded packages
   injector -l mount_point                  - list the injected items
+  injector --owner mount_point user files  - change the owner of files
+  injector --url [PACKAGES]                - list the downloadable URL of packages
 my_usage
   exit 0
 }
@@ -166,11 +237,16 @@ while [ "$#" -gt 0 ]; do
 
     --delete) package_delete $2 $3; exit 0;;
 
-    -l|--list) list_injected $2; exit 0;;
+    -l|--list) list_injected $2 $3; exit 0;;
 
     --owner) 
       shift
       change_owner "$@"
+      exit 0;;
+
+    --url)
+      shift
+      package_url "$@"
       exit 0;;
 
     -*) echo Unknown parameter [$@]; exit 1;;
@@ -197,12 +273,34 @@ echo "[INFO] First boot script running..."
 # === Your commands go here ===
 touch $ADMIN/firstboot-ran
 
-apt-get --no-download install hostapd dnsmasq wireless-tools psmisc -y
+apt-get --no-download -y install libiw30
+apt-get --no-download -y install dnsmasq 
+apt-get --no-download -y install wireless-tools 
+apt-get --no-download -y install psmisc
+apt-get --no-download -y install lsof
+
+# for unknown reason, the hostapd could not be installed by apt-get
+# always showing "E: Unable to fetch some archives" yet never showing
+# what archives were missing. 
+#apt-get --no-download -y install hostapd 
+dpkg -i /var/cache/apt/archives/hostapd_*
+
+# disable hostapd and dnsmasq as system service, 
+# because we only use it one off
+echo "Disabling hostapd and dnsmasq"
+systemctl stop hostapd
+systemctl disable hostapd
+systemctl stop dnsmasq
+systemctl disable dnsmasq
+
+if test -f /var/cache/apt/archives/heg_*.deb; then
+  dpkg -i /var/cache/apt/archives/heg_*.deb
+fi
 
 echo "Creating /etc/hostapd/hostapd.conf"
 cat << SUBEOF > /etc/hostapd/hostapd.conf
 interface=wlan0
-ssid=MyDeviceAP
+ssid=HegA1AP
 channel=6
 hw_mode=g
 auth_algs=1
@@ -218,11 +316,26 @@ dhcp-option=3,192.168.42.1
 address=/gateway/192.168.42.1
 SUBEOF
 
+# disable the systemd-resolved temporarily
+# otherwise dnsmasq would fail to run
+echo "Stopping the systemd-resolved"
+systemctl stop systemd-resolved
+echo "nameserver 127.0.0.1" > /etc/resolv.conf
+
 # === Delete self and systemd unit ===
 echo "Removing the one-off start up script"
+systemctl disable $BOOTSERVICE
 rm -f /etc/systemd/system/$BOOTSERVICE
-rm -f $BOOTSCRIPT
-systemctl daemon-reexec
+#rm -f $BOOTSCRIPT
+#systemctl daemon-reexec
+sleep 1
+
+# start AP mode
+echo "Starting AP mode"
+ip link set wlan0 up
+ip addr add 192.168.42.1/24 dev wlan0
+hostapd -B /etc/hostapd/hostapd.conf
+dnsmasq --conf-file=/etc/dnsmasq.ap.conf
 EOF
 chmod 755 ${1}$BOOTSCRIPT
 
@@ -232,7 +345,11 @@ echo "Injecting the systemd service to ${1}/etc/systemd/system/$BOOTSERVICE"
 cat << EOF > ${1}/etc/systemd/system/$BOOTSERVICE
 [Unit]
 Description=First boot script
-After=network-online.target
+# Delay until the system is fully up
+#After=multi-user.target network-online.target
+#Wants=network-online.target
+After=default.target
+WantedBy=default.target
 
 [Service]
 Type=oneshot
@@ -251,6 +368,8 @@ cp -f 00-installer-config_ap.yaml ${1}/etc/netplan/00-installer-config.yaml
 ## download required packages
 echo "Downloading the required packages"
 package_download $URLLIST $1
+cp -f switch_to_ap.sh ${1}/usr/local/sbin
+cp -f switch_to_sta.sh ${1}/usr/local/sbin
 
 ## for admin convenience
 echo "Injecting VIM profile"

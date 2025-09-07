@@ -9,6 +9,11 @@ sudo killall wpa_supplicant
 #sudo networkctl down wlan0
 sudo ip link set wlan0 down
 
+# disable systemd-resolved
+sudo systemctl stop systemd-resolved
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+
+
 # Static IP for AP
 sudo ip addr flush dev wlan0
 sudo ip link set wlan0 up
