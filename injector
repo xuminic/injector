@@ -21,6 +21,10 @@ PKGLIST="hostapd dnsmasq wireless-tools psmisc libiw30 lsof"
 
 condition_check()
 {
+  if test x"$1" = "x/"; then
+    echo "warning: operating on host's root file system"
+    return 0
+  fi
   if ! test -d "$1/etc"; then
     echo "error: root file system not found at \"$1\""
     return 0
@@ -53,6 +57,8 @@ uninstall()
   rm -f ${1}$ADMIN/.vimrc
   echo "Recovering to the original netplan"
   cp -f 00-installer-config_orig.yaml ${1}/etc/netplan/00-installer-config.yaml
+  echo "Recovering to the original rc-local.service"
+  cp -f rc-local_orig.service ${1}/lib/systemd/system/rc-local.service
 
   package_delete $URLLIST $1
   exit 0
@@ -65,6 +71,7 @@ list_injected()
 	  ${1}/etc/systemd/system/$BOOTSERVICE \
 	  ${1}/etc/systemd/system/multi-user.target.wants/$BOOTSERVICE \
 	  ${1}/etc/netplan/* \
+	  ${1}/lib/systemd/system/rc-local.service \
 	  ${1}$ADMIN/.vimrc \
 	  ${1}/var/cache/apt/archives/*.deb"
   ls -l $LIST
@@ -261,6 +268,11 @@ fi
 if ! test x$2 = "x"; then
   PACKAGE=$2
 fi
+  
+condition_check $1
+if test "$?" = "0"; then
+  exit 1
+fi
 
 ## inject the one-off initial script
 echo "Injecting the one-off initial script to ${1}$BOOTSCRIPT"
@@ -370,6 +382,10 @@ echo "Downloading the required packages"
 package_download $URLLIST $1
 cp -f switch_to_ap.sh ${1}/usr/local/sbin
 cp -f switch_to_sta.sh ${1}/usr/local/sbin
+
+## system patch
+echo "Fixing the rc-local.service"
+cp -f rc-local_fixed.service ${1}/lib/systemd/system/rc-local.service
 
 ## for admin convenience
 echo "Injecting VIM profile"
